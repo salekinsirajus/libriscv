@@ -46,13 +46,16 @@ namespace riscv
 					// TODO: Allocate unpresent pages for the whole address space,
 					// and only allocate real memory according to pages_max. Then handle
 					// page faults for the rest of the address space using userfaultfd.
-					this->m_arena.data = (PageData *)mmap(NULL, UNBOUNDED_ARENA_SIZE, PROT_READ | PROT_WRITE,
+					auto* base_ptr = (uint8_t *)mmap(NULL, UNBOUNDED_ARENA_SIZE, PROT_READ | PROT_WRITE,
 						MAP_ANONYMOUS | MAP_PRIVATE | MAP_NORESERVE, -1, 0);
-					if (UNLIKELY(this->m_arena.data == MAP_FAILED)) {
+					if (UNLIKELY(base_ptr == MAP_FAILED)) {
 						// We probably reached a limit on the number of mappings
 						this->m_arena.data = nullptr;
 						throw MachineException(OUT_OF_MEMORY, "Out of memory", UNBOUNDED_ARENA_SIZE);
 					}
+					// Adjust pointer forward by OVERALLOCATE to provide over-allocation on both sides
+					// while keeping arena at same logical address (relative to zero)
+					this->m_arena.data = (PageData *)(base_ptr + Memory::OVERALLOCATE);
 					this->m_arena.pages = (1ULL << encompassing_Nbit_arena) / Page::size();
 					/*this->m_arena.data = (PageData *)mmap(m_arena.data, (pages_max + 1) * Page::size(), PROT_READ | PROT_WRITE,
 						MAP_FIXED | MAP_ANONYMOUS | MAP_PRIVATE | MAP_NORESERVE, -1, 0);
@@ -61,14 +64,19 @@ namespace riscv
 					}*/
 				} else {
 					// Over-allocate by 1 page in order to avoid bounds-checking with size
+					// The extra page also provides over-allocation on both sides
 					const size_t len = (pages_max + 1) * Page::size();
-					this->m_arena.data = (PageData *)mmap(NULL, len, PROT_READ | PROT_WRITE,
+					auto* base_ptr = (uint8_t *)mmap(NULL, len, PROT_READ | PROT_WRITE,
 						MAP_ANONYMOUS | MAP_PRIVATE | MAP_NORESERVE, -1, 0);
 					this->m_arena.pages = pages_max;
 					// mmap() returns MAP_FAILED (-1) when mapping fails
-					if (UNLIKELY(this->m_arena.data == MAP_FAILED)) {
+					if (UNLIKELY(base_ptr == MAP_FAILED)) {
 						this->m_arena.data = nullptr;
 						this->m_arena.pages = 0;
+					} else {
+						// Adjust pointer forward by OVERALLOCATE to provide over-allocation on both sides
+						// while keeping arena at same logical address (relative to zero)
+						this->m_arena.data = (PageData *)(base_ptr + Memory::OVERALLOCATE);
 					}
 				}
 #else
@@ -76,11 +84,17 @@ namespace riscv
 				{
 					// Allocate a complete N-bit arena, covering the entire N-bit address space
 					// Add 1 extra page to avoid having to bounds-check memory accesses
-					this->m_arena.data = new PageData[UNBOUNDED_ARENA_SIZE / Page::size()];
+					auto* base_ptr = (uint8_t *)new PageData[UNBOUNDED_ARENA_SIZE / Page::size()];
+					// Adjust pointer forward by OVERALLOCATE to provide over-allocation on both sides
+					// while keeping arena at same logical address (relative to zero)
+					this->m_arena.data = (PageData *)(base_ptr + Memory::OVERALLOCATE);
 					this->m_arena.pages = (1ULL << encompassing_Nbit_arena) / Page::size();
 				} else {
 					// TODO: XXX: Investigate if this is a time sink
-					this->m_arena.data = new PageData[pages_max + 1];
+					auto* base_ptr = (uint8_t *)new PageData[pages_max + 1];
+					// Adjust pointer forward by OVERALLOCATE to provide over-allocation on both sides
+					// while keeping arena at same logical address (relative to zero)
+					this->m_arena.data = (PageData *)(base_ptr + Memory::OVERALLOCATE);
 					this->m_arena.pages = pages_max;
 				}
 #endif
@@ -159,15 +173,19 @@ namespace riscv
 		// only the original machine owns arena
 		if (this->m_arena.data != nullptr && !is_forked()) {
 #if defined(__linux__) || defined(__FreeBSD__)
+			// Adjust back to the original base pointer (subtract OVERALLOCATE)
+			auto* base_ptr = (uint8_t *)this->m_arena.data - Memory::OVERALLOCATE;
 			if constexpr (riscv::encompassing_Nbit_arena != 0)
 			{
 				// munmap() the entire address space
-				munmap(this->m_arena.data, UNBOUNDED_ARENA_SIZE);
+				munmap(base_ptr, UNBOUNDED_ARENA_SIZE);
 			} else {
-				munmap(this->m_arena.data, (this->m_arena.pages + 1) * Page::size());
+				munmap(base_ptr, (this->m_arena.pages + 1) * Page::size());
 			}
 #else
-			delete[] this->m_arena.data;
+			// Adjust back to the original base pointer (subtract OVERALLOCATE)
+			auto* base_ptr = (PageData *)((uint8_t *)this->m_arena.data - Memory::OVERALLOCATE);
+			delete[] base_ptr;
 #endif
 		}
 	}
